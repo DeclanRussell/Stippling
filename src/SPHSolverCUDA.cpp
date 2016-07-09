@@ -43,10 +43,24 @@ SPHSolverCUDA::SPHSolverCUDA(float _x, float _y, float _t, float _l)
     m_fluidBuffers.convergedPtr = 0;
     m_fluidBuffers.bndCellIdxBuff = 0;
     m_fluidBuffers.bndCellOccBuff = 0;
-    m_fluidBuffers.pixelVar = 0;
+    m_fluidBuffers.pixelI = 0;
+    m_fluidBuffers.pixelCMYK = 0;
+    m_fluidBuffers.classBuff = 0;
 
     m_simBounds = make_float3(_x,_y,0.f);
-
+    std::vector<float> intensity;
+    intensity.resize(200*200);
+    std::vector<float4> cmyk;
+    cmyk.resize(200*200);
+    for(unsigned int i=0;i<intensity.size();i++)
+    {
+        intensity[i]=1.f;
+        cmyk[i] = make_float4(1.f,1.f,1.f,1.f);
+    }
+    checkCudaErrors(cudaMalloc(&m_fluidBuffers.pixelI,sizeof(float)*intensity.size()));
+    checkCudaErrors(cudaMemcpy(m_fluidBuffers.pixelI,&intensity[0],sizeof(float)*intensity.size(),cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMalloc(&m_fluidBuffers.pixelCMYK,sizeof(float4)*cmyk.size()));
+    checkCudaErrors(cudaMemcpy(m_fluidBuffers.pixelCMYK,&cmyk[0],sizeof(float)*cmyk.size(),cudaMemcpyHostToDevice));
 
     m_simProperties.gridDim = make_float2(0,0);
     setSmoothingLength(0.3f);
@@ -63,6 +77,7 @@ SPHSolverCUDA::SPHSolverCUDA(float _x, float _y, float _t, float _l)
     m_restDensity = 500.f;
     m_densityDiff = 150.f;
     m_volume = 0;
+    m_multiclass = false;
 
     //Define our boundaries
     float2 hmin = make_float2(-_t,-_t);
@@ -118,8 +133,8 @@ SPHSolverCUDA::SPHSolverCUDA(float _x, float _y, float _t, float _l)
 
     // Create an OpenGL buffer for our position buffer
     // Create our VAO and vertex buffers
-    glGenVertexArrays(1, &m_posVAO);
-    glBindVertexArray(m_posVAO);
+    glGenVertexArrays(1, &m_activeVAO);
+    glBindVertexArray(m_activeVAO);
 
     // Put our vertices into an OpenGL buffer
     glGenBuffers(1, &m_posVBO);
@@ -131,16 +146,26 @@ SPHSolverCUDA::SPHSolverCUDA(float _x, float _y, float _t, float _l)
     // create our cuda graphics resource for our vertexs used for our OpenGL interop
     checkCudaErrors(cudaGraphicsGLRegisterBuffer(&m_resourcePos, m_posVBO, cudaGraphicsRegisterFlagsWriteDiscard));
 
+    // Put our vertices into an OpenGL buffer
+    glGenBuffers(1, &m_classVBO);
+    glBindBuffer(GL_ARRAY_BUFFER, m_classVBO);
+    // We must alocate some space otherwise cuda cannot register it
+    glBufferData(GL_ARRAY_BUFFER, sizeof(float), NULL, GL_DYNAMIC_DRAW);
+    glEnableVertexAttribArray(1);
+    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, 0, 0);
+    // create our cuda graphics resource for our vertexs used for our OpenGL interop
+    checkCudaErrors(cudaGraphicsGLRegisterBuffer(&m_resourceClass, m_classVBO, cudaGraphicsRegisterFlagsWriteDiscard));
+
     // Unbind everything just in case
     glBindVertexArray(0);
     glBindBuffer(GL_ARRAY_BUFFER, 0);
-
 }
 //----------------------------------------------------------------------------------------------------------------------
 SPHSolverCUDA::~SPHSolverCUDA()
 {
     // Make sure we remember to unregister our cuda resource
     checkCudaErrors(cudaGraphicsUnregisterResource(m_resourcePos));
+    checkCudaErrors(cudaGraphicsUnregisterResource(m_resourceClass));
     checkCudaErrors(cudaGraphicsUnregisterResource(m_resourceBndPos));
 
     // Delete our CUDA buffers
@@ -154,7 +179,8 @@ SPHSolverCUDA::~SPHSolverCUDA()
     if(m_fluidBuffers.convergedPtr) checkCudaErrors(cudaFree(m_fluidBuffers.convergedPtr));
     if(m_fluidBuffers.bndCellIdxBuff) checkCudaErrors(cudaFree(m_fluidBuffers.bndCellIdxBuff));
     if(m_fluidBuffers.bndCellOccBuff) checkCudaErrors(cudaFree(m_fluidBuffers.bndCellOccBuff));
-    if(m_fluidBuffers.pixelVar) checkCudaErrors(cudaFree(m_fluidBuffers.pixelVar));
+    if(m_fluidBuffers.pixelI) checkCudaErrors(cudaFree(m_fluidBuffers.pixelI));
+    if(m_fluidBuffers.pixelCMYK) checkCudaErrors(cudaFree(m_fluidBuffers.pixelCMYK));
     // Make sure these are set to 0 just in case
     m_fluidBuffers.accPtr = 0;
     m_fluidBuffers.velPtr = 0;
@@ -166,12 +192,14 @@ SPHSolverCUDA::~SPHSolverCUDA()
     m_fluidBuffers.convergedPtr = 0;
     m_fluidBuffers.bndCellIdxBuff = 0;
     m_fluidBuffers.bndCellOccBuff = 0;
-    m_fluidBuffers.pixelVar = 0;
+    m_fluidBuffers.pixelI = 0;
+    m_fluidBuffers.pixelCMYK = 0;
     // Delete our CUDA streams as well
     checkCudaErrors(cudaStreamDestroy(m_cudaStream));
     // Delete our openGL objects
     glDeleteBuffers(1,&m_posVBO);
-    glDeleteVertexArrays(1,&m_posVAO);
+    glDeleteBuffers(1,&m_classVBO);
+    glDeleteVertexArrays(1,&m_activeVAO);
     glDeleteBuffers(1,&m_bndVBO);
     glDeleteVertexArrays(1,&m_bndPosVAO);
 
@@ -184,16 +212,33 @@ void SPHSolverCUDA::setParticles(std::vector<float3> &_particles)
 
     // Unregister our resource
     checkCudaErrors(cudaGraphicsUnregisterResource(m_resourcePos));
+    checkCudaErrors(cudaGraphicsUnregisterResource(m_resourceClass));
 
     // Fill our buffer with our positions
-    glBindVertexArray(m_posVAO);
-    glBindBuffer(GL_ARRAY_BUFFER, m_posVBO);
+    glBindVertexArray(m_activeVAO);
     if(_particles.size())
     {
+        glBindBuffer(GL_ARRAY_BUFFER, m_posVBO);
         glBufferData(GL_ARRAY_BUFFER, sizeof(float3)*_particles.size(), &_particles[0], GL_DYNAMIC_DRAW);
-
         // create our cuda graphics resource for our vertexs used for our OpenGL interop
         checkCudaErrors(cudaGraphicsGLRegisterBuffer(&m_resourcePos, m_posVBO, cudaGraphicsRegisterFlagsWriteDiscard));
+
+        // Generate some classes for our particles
+        std::vector<float> classes;
+        classes.resize(_particles.size());
+        float ccount = 0.f;
+        for(unsigned int i=0;i<classes.size();i++)
+        {
+            classes[i] = ccount;
+            ccount+=1.f;
+            if(ccount>3)ccount=0.f;
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, m_classVBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(float)*classes.size(), &classes[0], GL_DYNAMIC_DRAW);
+
+        // create our cuda graphics resource for our vertexs used for our OpenGL interop
+        checkCudaErrors(cudaGraphicsGLRegisterBuffer(&m_resourceClass, m_classVBO, cudaGraphicsRegisterFlagsWriteDiscard));
+
 
         // Delete our CUDA buffers fi they have anything in them
         if(m_fluidBuffers.velPtr) checkCudaErrors(cudaFree(m_fluidBuffers.velPtr));
@@ -229,6 +274,8 @@ void SPHSolverCUDA::setParticles(std::vector<float3> &_particles)
         size_t posSize;
         checkCudaErrors(cudaGraphicsMapResources(1,&m_resourcePos));
         checkCudaErrors(cudaGraphicsResourceGetMappedPointer((void**)&m_fluidBuffers.posPtr,&posSize,m_resourcePos));
+        checkCudaErrors(cudaGraphicsMapResources(1,&m_resourceClass));
+        checkCudaErrors(cudaGraphicsResourceGetMappedPointer((void**)&m_fluidBuffers.classBuff,&posSize,m_resourceClass));
 
         int tableSize = (int)ceil(m_simProperties.gridRes.x *m_simProperties.gridRes.y);
         fillIntZero(m_cudaStream,m_threadsPerBlock,m_fluidBuffers.cellIndexBuffer,tableSize);
@@ -239,6 +286,7 @@ void SPHSolverCUDA::setParticles(std::vector<float3> &_particles)
 
         //unmap our buffer pointer and set it free into the wild
         checkCudaErrors(cudaGraphicsUnmapResources(1,&m_resourcePos));
+        checkCudaErrors(cudaGraphicsUnmapResources(1,&m_resourceClass));
 
         //Set our volume if it hasnt already been set
         if(!m_volume)
@@ -252,10 +300,17 @@ void SPHSolverCUDA::setParticles(std::vector<float3> &_particles)
     }
     else
     {
+        glBindBuffer(GL_ARRAY_BUFFER, m_posVBO);
         glBufferData(GL_ARRAY_BUFFER, sizeof(float3), NULL, GL_DYNAMIC_DRAW);
 
+        glBindBuffer(GL_ARRAY_BUFFER, m_classVBO);
+        glBufferData(GL_ARRAY_BUFFER, sizeof(float), NULL, GL_DYNAMIC_DRAW);
+
         // create our cuda graphics resource for our vertexs used for our OpenGL interop
-        checkCudaErrors(cudaGraphicsGLRegisterBuffer(&m_resourcePos, m_posVBO, cudaGraphicsRegisterFlagsWriteDiscard));
+        checkCudaErrors(cudaGraphicsGLRegisterBuffer(&m_resourcePos, m_posVBO, cudaGraphicsRegisterFlagsWriteDiscard));        
+        checkCudaErrors(cudaGraphicsGLRegisterBuffer(&m_resourcePos, m_classVBO, cudaGraphicsRegisterFlagsWriteDiscard));
+
+
 
         // Delete our CUDA buffers fi they have anything in them
         if(m_fluidBuffers.velPtr) checkCudaErrors(cudaFree(m_fluidBuffers.velPtr));
@@ -391,6 +446,8 @@ void SPHSolverCUDA::update()
     size_t posSize;
     checkCudaErrors(cudaGraphicsMapResources(1,&m_resourcePos));
     checkCudaErrors(cudaGraphicsResourceGetMappedPointer((void**)&m_fluidBuffers.posPtr,&posSize,m_resourcePos));
+    checkCudaErrors(cudaGraphicsMapResources(1,&m_resourceClass));
+    checkCudaErrors(cudaGraphicsResourceGetMappedPointer((void**)&m_fluidBuffers.classBuff,&posSize,m_resourceClass));
     checkCudaErrors(cudaGraphicsMapResources(1,&m_resourceBndPos));
     checkCudaErrors(cudaGraphicsResourceGetMappedPointer((void**)&m_fluidBuffers.bndPos,&posSize,m_resourceBndPos));
 
@@ -398,27 +455,49 @@ void SPHSolverCUDA::update()
     hashAndSort(m_cudaStream, m_threadsPerBlock, m_simProperties.numParticles, tableSize , m_fluidBuffers);
 
     // Compute our density
-    initDensity(m_cudaStream,m_threadsPerBlock,m_simProperties.numParticles,m_fluidBuffers);
+    initDensity(m_cudaStream,m_threadsPerBlock,m_simProperties.numParticles,m_fluidBuffers,m_multiclass);
 
     // Compute our rest density
     m_restDensity = getAverageDensity() - m_densityDiff;
     //std::cout<<"AvgDenstiy: "<<m_restDensity+m_densityDiff<<std::endl;
 
     // Solve for our new positions
-    solve(m_cudaStream,m_threadsPerBlock,m_simProperties.numParticles,m_restDensity,m_fluidBuffers);
+    solve(m_cudaStream,m_threadsPerBlock,m_simProperties.numParticles,m_restDensity,m_fluidBuffers,m_multiclass);
 
     //unmap our buffer pointer and set it free into the wild
     checkCudaErrors(cudaGraphicsUnmapResources(1,&m_resourcePos));
+    checkCudaErrors(cudaGraphicsUnmapResources(1,&m_resourceClass));
     checkCudaErrors(cudaGraphicsUnmapResources(1,&m_resourceBndPos));
 }
 
 //----------------------------------------------------------------------------------------------------------------------
-void SPHSolverCUDA::setPixelVariance(std::vector<float> &_i)
+void SPHSolverCUDA::setSampleImage(QString _loc)
 {
-    checkCudaErrors(cudaFree(m_fluidBuffers.pixelVar));
-    m_fluidBuffers.pixelVar = 0;
-    checkCudaErrors(cudaMalloc(&m_fluidBuffers.pixelVar,sizeof(float)*_i.size()));
-    checkCudaErrors(cudaMemcpy(m_fluidBuffers.pixelVar,&_i[0],sizeof(float)*_i.size(),cudaMemcpyHostToDevice));
+    QImage img(_loc);
+    QColor c;
+    float i;
+    std::vector<float> intensity;
+    std::vector<float4> cmyk;
+    intensity.resize(img.width()*img.height());
+    cmyk.resize(img.width()*img.height());
+    for(int x=0;x<img.width();x++)
+    for(int y=0;y<img.width();y++)
+    {
+        c = QColor(img.pixel(x,y));
+        i = 0.2989f*c.redF()+0.5870f*c.greenF()+0.1140f*c.blueF();
+        intensity[x+(img.height()-1-y)*img.width()] = i;
+        cmyk[i] = make_float4(c.cyanF(),c.magentaF(),c.yellowF(),c.blackF());
+        std::cout<<cmyk[i].x<<","<<cmyk[i].y<<","<<cmyk[i].z<<","<<cmyk[i].w<<std::endl;
+    }
+    checkCudaErrors(cudaFree(m_fluidBuffers.pixelI));
+    m_fluidBuffers.pixelI = 0;
+    checkCudaErrors(cudaMalloc(&m_fluidBuffers.pixelI,sizeof(float)*intensity.size()));
+    checkCudaErrors(cudaMemcpy(m_fluidBuffers.pixelI,&intensity[0],sizeof(float)*intensity.size(),cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaFree(m_fluidBuffers.pixelCMYK));
+    m_fluidBuffers.pixelCMYK = 0;
+    checkCudaErrors(cudaMalloc(&m_fluidBuffers.pixelCMYK,sizeof(float4)*cmyk.size()));
+    checkCudaErrors(cudaMemcpy(m_fluidBuffers.pixelCMYK,&cmyk[0],sizeof(float4)*cmyk.size(),cudaMemcpyHostToDevice));
+
     updateGPUSimProps();
 }
 //----------------------------------------------------------------------------------------------------------------------

@@ -65,20 +65,7 @@ void NGLScene::resizeGL(int _w , int _h)
 //----------------------------------------------------------------------------------------------------------------------
 void NGLScene::setSampleImage(QString _dir)
 {
-    QImage img(_dir);
-    QColor c;
-    float i;
-    std::vector<float> intensity;
-    intensity.resize(img.width()*img.height());
-    for(int x=0;x<img.width();x++)
-    for(int y=0;y<img.width();y++)
-    {
-        c = QColor(img.pixel(x,y));
-        i = 0.2989f*c.redF()+0.5870f*c.greenF()+0.1140f*c.blueF();
-        intensity[x+(img.height()-1-y)*img.width()] = i;
-    }
-    m_SPHSolverCUDA->setPixelVariance(intensity);
-
+    m_SPHSolverCUDA->setSampleImage(_dir);
 }
 //----------------------------------------------------------------------------------------------------------------------
 void NGLScene::resetSim()
@@ -119,6 +106,7 @@ void NGLScene::initializeGL()
 #endif
 
   glClearColor(1.f, 1.f, 1.0f, 1.0f);			   // White Background
+  //glClearColor(.7f, .7f, .7f, 1.0f);
   // enable depth testing for drawing
   glEnable(GL_DEPTH_TEST);
   // enable multisampling for smoother drawing
@@ -180,10 +168,6 @@ void NGLScene::initializeGL()
 
   //Create our SPH Solver
   m_SPHSolverCUDA = new SPHSolverCUDA;
-  std::vector<float> pixelVar;
-  pixelVar.resize(200*200);
-  for(unsigned int i=0;i<pixelVar.size();i++)pixelVar[i]=1.f;
-  m_SPHSolverCUDA->setPixelVariance(pixelVar);
 
   m_SPHSolverCUDA->genRandomSamples(160000);
 
@@ -249,8 +233,15 @@ void NGLScene::paintGL()
   m_mouseGlobalTX[3][1] = m_modelPos.y;
   m_mouseGlobalTX[3][2] = m_modelPos.z;
 
-  m_particleDrawer->setColour(0.f,0.f,0.f);
-  m_particleDrawer->drawFromVAO(m_SPHSolverCUDA->getPositionsVAO(),m_SPHSolverCUDA->getNumParticles(), m_mouseGlobalTX,m_cam.getViewMatrix(),m_cam.getProjectionMatrix());
+  if(m_SPHSolverCUDA->isColorStippling())
+  {
+      m_particleDrawer->drawCMYKFromVAO(m_SPHSolverCUDA->getActiveVAO(),m_SPHSolverCUDA->getNumParticles(), m_mouseGlobalTX,m_cam.getViewMatrix(),m_cam.getProjectionMatrix());
+  }
+  else
+  {
+      m_particleDrawer->setColour(0.f,0.f,0.f);
+      m_particleDrawer->drawFromVAO(m_SPHSolverCUDA->getActiveVAO(),m_SPHSolverCUDA->getNumParticles(), m_mouseGlobalTX,m_cam.getViewMatrix(),m_cam.getProjectionMatrix());
+  }
   m_particleDrawer->setColour(0.f,0.f,1.f);
   m_particleDrawer->drawFromVAO(m_SPHSolverCUDA->getBndPositionsVAO(),m_SPHSolverCUDA->getNumBoundParticles(), m_mouseGlobalTX,m_cam.getViewMatrix(),m_cam.getProjectionMatrix());
 
@@ -381,6 +372,8 @@ void NGLScene::keyPressEvent(QKeyEvent *_event)
   {
   // escape key to quit
   case Qt::Key_Escape : QGuiApplication::exit(EXIT_SUCCESS); break;
+  // toggle colour tippling
+  case Qt::Key_Q : m_SPHSolverCUDA->toggleColorStippling(); break;
   // turn on wirframe rendering
   case Qt::Key_W : glPolygonMode(GL_FRONT_AND_BACK,GL_LINE); break;
   // turn off wire frame

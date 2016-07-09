@@ -164,7 +164,7 @@ __device__ float calcCoheWeighting(float _rLength)
     return w;
 }
 //----------------------------------------------------------------------------------------------------------------------
-__device__ float getPixelVar(float3 _p, float* _buff)
+__device__ float getPixelIntensity(float3 _p, float* _buff)
 {
     float3 np = _p;
     np/=15.f;
@@ -179,9 +179,29 @@ __device__ float getPixelVar(float3 _p, float* _buff)
 
 }
 //----------------------------------------------------------------------------------------------------------------------
+__device__ float getPixelCMYK(float3 _p,float pClass, float4* _buff)
+{
+    float3 np = _p;
+    np/=15.f;
+    if(np.x<0.f || np.x>1.f || np.y<0.f || np.y>1.f)
+    {
+        printf("out of bounds\n");
+        return 1.f;
+    }
+    np*=make_float3(199.f,199.f,0);
+    np = floorf(np);
+    float4 cmyk = _buff[(int)np.x + (int)(np.y*200.f)];
+//    if(pClass==0.f) return cmyk.x;
+//    if(pClass==1.f) return cmyk.y;
+//    if(pClass==2.f) return cmyk.z;
+//    if(pClass==3.f) return cmyk.w;
+    return cmyk.x;
+
+}
+//----------------------------------------------------------------------------------------------------------------------
 __device__ float invScale(float _var)
 {
-    return (sqrt(_var));//*0.999f)+0.001f;
+    return ((sqrt(_var))*0.999f)+0.001f;
 }
 //----------------------------------------------------------------------------------------------------------------------
 __device__ float sizeFunction(float _rLength, float _vari, float _varj)
@@ -195,6 +215,71 @@ __device__ float sizeFunction(float _rLength, float _vari, float _varj)
 //    printf("yi %f si %f yj %f sj %f s %f rLength %f\n",_pi.y,sizeFunc(_pi),_pn.y,sizeFunc(_pn),s,_rLength);
 
     return s;
+}
+//----------------------------------------------------------------------------------------------------------------------
+__global__ void solveDensityMultiClassKernal(int _numParticles, fluidBuffers _buff)
+{
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if(idx<_numParticles)
+    {
+        // Get our particle position
+        float3 pi = _buff.posPtr[idx];
+        int key = hashPos(pi-make_float3(props.gridMin.x,props.gridMin.y,0));
+        // Get our neighbouring cell locations for this particle
+        cellInfo nCells = _buff.hashMap[key];
+
+        // Compute our density for all our particles
+        int cellOcc;
+        int cellIdx;
+        int nIdx;
+        float di = 0.f;
+        float3 pj;
+        float rLength,varj;
+        float classI = _buff.classBuff[idx];
+        float classJ,sf;
+        float vari = getPixelCMYK(pi,classI,_buff.pixelCMYK);
+        for(int c=0; c<nCells.cNum; c++)
+        {
+            // Get our cell occupancy total and start index
+            cellOcc = _buff.cellOccBuffer[nCells.cIdx[c]];
+            cellIdx = _buff.cellIndexBuffer[nCells.cIdx[c]];
+            for(int i=0; i<cellOcc; i++)
+            {
+                //Get our neighbour particle index
+                nIdx = cellIdx+i;
+                //Dont want to compare against same particle
+                if(nIdx==idx) continue;
+                // Get our neighbour position
+                pj = _buff.posPtr[nIdx];
+                //Calculate our length
+                rLength = length(pi-pj);
+                classJ = _buff.classBuff[nIdx];
+                varj = getPixelCMYK(pj,classJ,_buff.pixelCMYK);
+                //Increment our density
+                //di+=props.mass*calcDensityWeighting(rLength);
+                sf = sizeFunction(rLength,vari,varj);
+                //if(classI!=classJ) sf*=3.f;
+                di+=props.mass*calcDensityWeighting(sf);
+            }
+            // Do the same thing but for our boundary ghost particles
+            // Get our cell occupancy total and start index
+            cellOcc = _buff.bndCellOccBuff[nCells.cIdx[c]];
+            cellIdx = _buff.bndCellIdxBuff[nCells.cIdx[c]];
+            for(int i=0; i<cellOcc; i++)
+            {
+                //Get our neighbour particle index
+                nIdx = cellIdx+i;
+                // Get our neighbour position
+                pj = _buff.bndPos[nIdx];
+                //Calculate our length
+                rLength = length(pi-pj);
+                //Increment our density
+                //di+=props.mass*calcDensityWeighting(rLength);
+                di+=props.mass*calcDensityWeighting(sizeFunction(rLength,vari,1.f));
+            }
+        }
+        _buff.denPtr[idx] = di;
+    }
 }
 //----------------------------------------------------------------------------------------------------------------------
 __global__ void solveDensityKernal(int _numParticles, fluidBuffers _buff)
@@ -214,7 +299,7 @@ __global__ void solveDensityKernal(int _numParticles, fluidBuffers _buff)
         int nIdx;
         float di = 0.f;
         float3 pj;
-        float vari = getPixelVar(pi,_buff.pixelVar);
+        float vari = getPixelIntensity(pi,_buff.pixelI);
         float rLength,varj;
         for(int c=0; c<nCells.cNum; c++)
         {
@@ -231,7 +316,7 @@ __global__ void solveDensityKernal(int _numParticles, fluidBuffers _buff)
                 pj = _buff.posPtr[nIdx];
                 //Calculate our length
                 rLength = length(pi-pj);
-                varj = getPixelVar(pj,_buff.pixelVar);
+                varj = getPixelIntensity(pj,_buff.pixelI);
                 //Increment our density
                 //di+=props.mass*calcDensityWeighting(rLength);
                 di+=props.mass*calcDensityWeighting(sizeFunction(rLength,vari,varj));
@@ -257,6 +342,173 @@ __global__ void solveDensityKernal(int _numParticles, fluidBuffers _buff)
     }
 }
 //----------------------------------------------------------------------------------------------------------------------
+__global__ void solveForcesMultiClassKernal(int _numParticles, float _restDensity, fluidBuffers _buff)
+{
+    int idx = threadIdx.x + blockIdx.x * blockDim.x;
+    if(idx<_numParticles)
+    {
+        // Get our particle position
+        float3 pi = _buff.posPtr[idx];
+        float di = _buff.denPtr[idx];
+        float3 acc = make_float3(0.f,0.f,0.f);
+        float avgLen = 0.f;
+        // Put this in its own scope means we get some registers back at the end of it (I think)
+        if(di>0.f)
+        {
+            // Get our neighbouring cell locations for this particle
+            cellInfo nCells = _buff.hashMap[hashPos(pi-make_float3(props.gridMin.x,props.gridMin.y,0))];
+
+            // Compute our fources for all our particles
+            int cellOcc,cellIdx,nIdx;
+            float classI = _buff.classBuff[idx];
+            float classJ,sf;
+            float vari = getPixelCMYK(pi,classI,_buff.pixelCMYK);
+            float dj,presi,presj,rLength,varj;
+            presi = calculatePressure(di,_restDensity);
+            int numN = 0;
+            float3 pj,r,w;
+            float3 presForce = make_float3(0.f,0.f,0.f);
+            float3 coheForce = make_float3(0.f,0.f,0.f);
+            for(int c=0; c<nCells.cNum; c++)
+            {
+                // Get our cell occupancy total and start index
+                cellOcc = _buff.cellOccBuffer[nCells.cIdx[c]];
+                cellIdx = _buff.cellIndexBuffer[nCells.cIdx[c]];
+                for(int i=0; i<cellOcc; i++)
+                {
+                    //Get our neighbour particle index
+                    nIdx = cellIdx+i;
+                    //Dont want to compare against same particle
+                    if(nIdx==idx) continue;
+                    // Get our neighbour density
+                    dj = _buff.denPtr[nIdx];
+                    if(dj>0.f)
+                    {
+                        // Get our neighbour position
+                        pj = _buff.posPtr[nIdx];
+                        //Get our vector beteen points
+                        r = pi - pj;
+                        //Calculate our length
+                        rLength=length(r);
+                        // Normalise our differential
+                        r/=rLength;
+
+                        //Compute our particles pressure
+                        presj = calculatePressure(dj,_restDensity);
+                        classJ = _buff.classBuff[nIdx];
+                        varj = getPixelCMYK(pj,classJ,_buff.pixelCMYK);
+                        //Weighting
+                        //w = calcPressureWeighting(r,rLength);
+                        sf = sizeFunction(rLength,vari,varj);
+                        //if(classI!=classJ) sf*=3.f;
+                        w = calcPressureWeighting(r,sf);
+                        // Accumilate our pressure force
+                        presForce+= ((presi/(di*di)) + (presj/(dj*dj))) * props.mass * w;
+                        // Accumilate our cohesion force
+//                        cw = calcCoheWeighting(sizeFunction(rLength,vari,varj));
+//                        if(cw!=cw) printf("cw %f\n",cw);
+//                        coheForce+=-props.tension*props.mass*props.mass*((2.f*_restDensity)/(di+dj))*r*cw;
+
+                        avgLen+=rLength;
+                        numN++;
+                    }
+
+                }
+                // Do the same for our boundary ghost particles
+                // Get our cell occupancy total and start index
+                cellOcc = _buff.bndCellOccBuff[nCells.cIdx[c]];
+                cellIdx = _buff.bndCellIdxBuff[nCells.cIdx[c]];
+                for(int i=0; i<cellOcc; i++)
+                {
+                    //Get our neighbour particle index
+                    nIdx = cellIdx+i;
+                    // Get our neighbour position
+                    pj = _buff.bndPos[nIdx];
+                    //Get our vector beteen points
+                    r = pi - pj;
+                    //Calculate our length
+                    rLength=length(r);
+                    // Normalise our differential
+                    r/=rLength;
+
+                    //Weighting
+                    w = calcPressureWeighting(r,sizeFunction(rLength,vari,1.f));
+
+                    // Accumilate our pressure force
+                    presForce+= (presi/(di*di)) * props.mass * w;
+
+                    // Accumilate our cohesion force
+//                    cw = calcCoheWeighting(rLength);
+//                    if(cw!=cw) printf("cw %f\n",cw);
+//                    coheForce+=-props.tension*props.mass*props.mass*((2.f*_restDensity)/(di+_restDensity))*r*cw;
+                }
+            }
+
+            // Compute our average distance between neighbours
+            avgLen/=numN;
+            // Complete our pressure force term
+            presForce*=-1.f*props.mass;
+            acc = (presForce+coheForce)/props.mass;
+        }
+
+        // Acceleration limit
+//        if(dot(acc,acc)>props.accLimit2)
+//        {
+//            acc *= props.accLimit/length(acc);
+//        }
+
+        // Now lets integerate our acceleration using leapfrog to get our new position
+        float3 halfBwd = _buff.velPtr[idx] - 0.5f*props.timeStep*acc;
+        float3 halfFwd = halfBwd + props.timeStep*acc;
+        // Apply velocity dampaning
+        halfFwd *= 0.9f;
+
+        //printf("vel %f,%f,%f\n",halfFwd.x,halfFwd.y,halfFwd.z);
+
+        //Velocity Limit
+//        if(dot(halfFwd,halfFwd)>props.velLimit2)
+//        {
+//            halfFwd *= props.velLimit/length(halfFwd);
+//        }
+
+        // Update our velocity
+        _buff.velPtr[idx] = halfFwd;
+
+
+        // Update our position
+        float3 oldPos = pi;
+        pi+= props.timeStep * halfFwd;
+
+
+        //Place our particles back in our bounds
+        //this could potentially have problems with velocity and such not being
+        //adjusted but we will leave that for future work (Hes says...)
+        if(pi.x<0.f){
+            pi.x = 0.f;
+        }
+        if(pi.y<0.f){
+            pi.y = 0.f;
+        }
+        if(pi.x>15.f){
+            pi.x = 15.f;
+        }
+        if(pi.y>15.f){
+            pi.y = 15.f;
+        }
+
+        _buff.posPtr[idx] = pi;
+        // Check to see if we have met our converged state
+        if(length(oldPos-pi)<props.convergeValue*avgLen)
+        {
+            _buff.convergedPtr[idx] = 1;
+        }
+        else
+        {
+            _buff.convergedPtr[idx] = 0;
+        }
+    }
+}
+//----------------------------------------------------------------------------------------------------------------------
 __global__ void solveForcesKernal(int _numParticles, float _restDensity, fluidBuffers _buff)
 {
     int idx = threadIdx.x + blockIdx.x * blockDim.x;
@@ -275,7 +527,7 @@ __global__ void solveForcesKernal(int _numParticles, float _restDensity, fluidBu
 
             // Compute our fources for all our particles
             int cellOcc,cellIdx,nIdx;
-            float vari = getPixelVar(pi,_buff.pixelVar);
+            float vari = getPixelIntensity(pi,_buff.pixelI);
             float dj,presi,presj,rLength,varj;
             presi = calculatePressure(di,_restDensity);
             int numN = 0;
@@ -309,7 +561,7 @@ __global__ void solveForcesKernal(int _numParticles, float _restDensity, fluidBu
                         //Compute our particles pressure
                         presj = calculatePressure(dj,_restDensity);
 
-                        varj = getPixelVar(pj,_buff.pixelVar);
+                        varj = getPixelIntensity(pj,_buff.pixelI);
                         //Weighting
                         //w = calcPressureWeighting(r,rLength);
                         w = calcPressureWeighting(r,sizeFunction(rLength,vari,varj));
@@ -500,63 +752,6 @@ void createHashMap(cudaStream_t _stream, int _threadsPerBlock, int _hashTableSiz
     cudaThreadSynchronize();
 }
 //----------------------------------------------------------------------------------------------------------------------
-void hashAndSortFzn(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, int _hashTableSize, float3 *posPtr, float *_varPtr, int *_occPtr, int *_idxPtr)
-{
-    int blocks = 1;
-    int threads = _numParticles;
-    if(_numParticles>_threadsPerBlock)
-    {
-        //calculate how many blocks we want
-        blocks = ceil(_numParticles/_threadsPerBlock)+1;
-        threads = _threadsPerBlock;
-    }
-
-    int *hashKeys = 0;
-    cudaMalloc(&hashKeys,_numParticles*sizeof(int));
-    fillIntZero(_stream,_threadsPerBlock,hashKeys,_numParticles);
-
-    //Hash our partilces
-    hashParticles<<<blocks,threads,0,_stream>>>(_numParticles,posPtr,hashKeys,_occPtr);
-
-    // check for error
-    cudaError_t error = cudaGetLastError();
-    if(error != cudaSuccess)
-    {
-      // print the CUDA error message and exit
-      printf("Hash Particles error: %s\n", cudaGetErrorString(error));
-      exit(-1);
-    }
-
-    //make sure all our threads are done
-    cudaThreadSynchronize();
-
-//    //Turn our raw pointers into thrust pointers so we can use
-//    //thrusts sort algorithm
-    thrust::device_ptr<int> t_hashPtr = thrust::device_pointer_cast(hashKeys);
-    thrust::device_ptr<float3> t_posPtr = thrust::device_pointer_cast(posPtr);
-    thrust::device_ptr<int> t_cellOccPtr = thrust::device_pointer_cast(_occPtr);
-    thrust::device_ptr<int> t_cellIdxPtr = thrust::device_pointer_cast(_idxPtr);
-    thrust::device_ptr<float> t_varPtr = thrust::device_pointer_cast(_varPtr);
-
-    //sort our buffers
-    thrust::sort_by_key(t_hashPtr,t_hashPtr+_numParticles, thrust::make_zip_iterator(thrust::make_tuple(t_posPtr,t_varPtr)));
-    //make sure all our threads are done
-    cudaThreadSynchronize();
-
-    //Create our cell indexs
-    //run an excludive scan on our arrays to do this
-    thrust::exclusive_scan(t_cellOccPtr,t_cellOccPtr+_hashTableSize,t_cellIdxPtr);
-
-    //make sure all our threads are done
-    cudaThreadSynchronize();
-
-    cudaFree(hashKeys);
-
-    //DEBUG: uncomment to print out counted cell occupancy
-    //thrust::copy(t_cellOccPtr, t_cellOccPtr+_hashTableSize, std::ostream_iterator<unsigned int>(std::cout, " "));
-    //std::cout<<"\n"<<std::endl;
-}
-//----------------------------------------------------------------------------------------------------------------------
 void hashAndSortBnd(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, int _hashTableSize, float3 *posPtr, int *_occPtr, int *_idxPtr)
 {
     int blocks = 1;
@@ -646,11 +841,12 @@ void hashAndSort(cudaStream_t _stream,int _threadsPerBlock, int _numParticles, i
     thrust::device_ptr<float3> t_posPtr = thrust::device_pointer_cast(_buff.posPtr);
     thrust::device_ptr<float3> t_velPtr = thrust::device_pointer_cast(_buff.velPtr);
     thrust::device_ptr<float3> t_accPtr = thrust::device_pointer_cast(_buff.accPtr);
+    thrust::device_ptr<float> t_classPtr = thrust::device_pointer_cast(_buff.classBuff);
     thrust::device_ptr<int> t_cellOccPtr = thrust::device_pointer_cast(_buff.cellOccBuffer);
     thrust::device_ptr<int> t_cellIdxPtr = thrust::device_pointer_cast(_buff.cellIndexBuffer);
 
     //sort our buffers
-    thrust::sort_by_key(t_hashPtr,t_hashPtr+_numParticles, thrust::make_zip_iterator(thrust::make_tuple(t_posPtr,t_velPtr,t_accPtr)));
+    thrust::sort_by_key(t_hashPtr,t_hashPtr+_numParticles, thrust::make_zip_iterator(thrust::make_tuple(t_posPtr,t_velPtr,t_accPtr,t_classPtr)));
     //make sure all our threads are done
     cudaThreadSynchronize();
 
@@ -665,9 +861,11 @@ void hashAndSort(cudaStream_t _stream,int _threadsPerBlock, int _numParticles, i
     //DEBUG: uncomment to print out counted cell occupancy
     //thrust::copy(t_cellOccPtr, t_cellOccPtr+_hashTableSize, std::ostream_iterator<unsigned int>(std::cout, " "));
     //std::cout<<"\n"<<std::endl;
+    //thrust::copy(t_classPtr, t_classPtr+_numParticles, std::ostream_iterator<int>(std::cout, " "));
+    //std::cout<<"\n"<<std::endl;
 }
 //----------------------------------------------------------------------------------------------------------------------
-void initDensity(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, fluidBuffers _buff)
+void initDensity(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, fluidBuffers _buff, bool _multiClass)
 {
     int blocks = 1;
     int threads = _numParticles;
@@ -679,8 +877,14 @@ void initDensity(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, 
     }
 
     //Solve our particles density
-    solveDensityKernal<<<blocks,threads,0,_stream>>>(_numParticles,_buff);
-
+    if(_multiClass)
+    {
+        solveDensityMultiClassKernal<<<blocks,threads,0,_stream>>>(_numParticles,_buff);
+    }
+    else
+    {
+        solveDensityKernal<<<blocks,threads,0,_stream>>>(_numParticles,_buff);
+    }
     cudaError_t error = cudaGetLastError();
     if(error != cudaSuccess)
     {
@@ -699,7 +903,7 @@ void initDensity(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, 
     //std::cout<<"\n"<<std::endl;
 }
 //----------------------------------------------------------------------------------------------------------------------
-void solve(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, float _restDensity, fluidBuffers _buff)
+void solve(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, float _restDensity, fluidBuffers _buff, bool _multiClass)
 {
     int blocks = 1;
     int threads = _numParticles;
@@ -712,7 +916,14 @@ void solve(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, float 
 
 
     //Solve for our new positions
-    solveForcesKernal<<<blocks,threads,0,_stream>>>(_numParticles, _restDensity, _buff);
+    if(_multiClass)
+    {
+        solveForcesKernal<<<blocks,threads,0,_stream>>>(_numParticles, _restDensity, _buff);
+    }
+    else
+    {
+        solveForcesKernal<<<blocks,threads,0,_stream>>>(_numParticles, _restDensity, _buff);
+    }
 
     //make sure all our threads are done
     cudaThreadSynchronize();

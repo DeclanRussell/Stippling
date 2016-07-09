@@ -128,9 +128,13 @@ struct fluidBuffers
     //----------------------------------------------------------------------------------------------------------------------
     float *denPtr;
     //----------------------------------------------------------------------------------------------------------------------
-    /// @brief pointer to our pixel variance buffer
+    /// @brief pointer to our pixel intensity buffer
     //----------------------------------------------------------------------------------------------------------------------
-    float* pixelVar;
+    float* pixelI;
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief pointer to our pixel CMYK buffer
+    //----------------------------------------------------------------------------------------------------------------------
+    float4 *pixelCMYK;
     //----------------------------------------------------------------------------------------------------------------------
     /// @brief pointer to our cell occupancy buffer on our device
     //----------------------------------------------------------------------------------------------------------------------
@@ -163,6 +167,10 @@ struct fluidBuffers
     /// @brief our boundary particle positions
     //----------------------------------------------------------------------------------------------------------------------
     float3 *bndPos;
+    //----------------------------------------------------------------------------------------------------------------------
+    /// @brief array to store our particles classes
+    //----------------------------------------------------------------------------------------------------------------------
+    float* classBuff;
     //----------------------------------------------------------------------------------------------------------------------
 };
 //----------------------------------------------------------------------------------------------------------------------
@@ -198,18 +206,6 @@ void fillIntZero(cudaStream_t _stream, int _threadsPerBlock, int *_bufferPtr, in
 //----------------------------------------------------------------------------------------------------------------------
 void createHashMap(cudaStream_t _stream, int _threadsPerBlock, int _hashTableSize, fluidBuffers _buff);
 //----------------------------------------------------------------------------------------------------------------------
-/// @brief Our hash and sort function for particles that only need to be hashed once that also have variance. E.g. Frozen paricles.
-/// @param _stream - Cuda stream to run our kernal on.
-/// @param _threadsPerBlock - number of threads we have availible per block.
-/// @param _numParticles - numbder of particles in our sim
-/// @param _hashTableSize - size of our hash table
-/// @param _posPtr - pointer to our position buffer
-/// @param _varPtr - pointer to our variance buffer
-/// @param _occPtr - pointer to our occupancy buffer
-/// @param _idxPtr - pointer to our index buffer
-//----------------------------------------------------------------------------------------------------------------------
-void hashAndSortFzn(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, int _hashTableSize, float3 *posPtr, float *_varPtr, int *_occPtr, int *_idxPtr);
-//----------------------------------------------------------------------------------------------------------------------
 /// @brief Our hash and sort function for particles that only need to be hashed once. E.g. Boundary paricles.
 /// @param _stream - Cuda stream to run our kernal on.
 /// @param _threadsPerBlock - number of threads we have availible per block.
@@ -235,8 +231,9 @@ void hashAndSort(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, 
 /// @param _threadsPerBlock - number of threads we have availible per block.
 /// @param _numParticles - number of particles in our sim
 /// @param _buff - our simualtion device buffers
+/// @param _multiClass - boolean representing if we are using multiclass
 //----------------------------------------------------------------------------------------------------------------------
-void initDensity(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, fluidBuffers _buff);
+void initDensity(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, fluidBuffers _buff, bool _multiClass);
 //----------------------------------------------------------------------------------------------------------------------
 /// @brief Our fluid solver function. Solves for our particles new positions through our navier stokes technique.
 /// @param _stream - Cuda stream to run our kernal on.
@@ -244,8 +241,9 @@ void initDensity(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, 
 /// @param _numParticles - numbder of particles in our sim
 /// @param _restDensity - the rest density of our particles
 /// @param _buff - our simualtion device buffers
+/// @param _multiClass - boolean representing if we are using multiclass
 //----------------------------------------------------------------------------------------------------------------------
-void solve(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, float _restDensity, fluidBuffers _buff);
+void solve(cudaStream_t _stream, int _threadsPerBlock, int _numParticles, float _restDensity, fluidBuffers _buff, bool _multiClass);
 //----------------------------------------------------------------------------------------------------------------------
 /// @brief Function to check to see if our simulation has converged
 /// @param _stream - Cuda stream to run our kernal on.

@@ -30,6 +30,26 @@ ParticleDrawer::ParticleDrawer() : m_numParticles(0)
     glUniform1f(m_pointSizeHndl,10.f);
     glUniform3f(m_colourHndl,0.f,1.f,1.f);
 
+    //set up our CMYK particle shader to render depth information to a texture
+    m_CMYKParticleShader = new ShaderProgram();
+    //load the source
+    Shader CMYKVert("shaders/CMYKParticleVert.glsl",GL_VERTEX_SHADER);
+    Shader CMYKFrag("shaders/CMYKParticleFrag.glsl",GL_FRAGMENT_SHADER);
+    m_CMYKParticleShader->attachShader(&CMYKVert);
+    m_CMYKParticleShader->attachShader(&CMYKFrag);
+    m_CMYKParticleShader->bindFragDataLocation(0, "fragout");
+    m_CMYKParticleShader->link();
+    m_CMYKParticleShader->use();
+
+    //Set some uniforms
+    m_CMYKpointSizeHndl = m_CMYKParticleShader->getUniformLoc("pointSize");
+    m_CMYKMVMatHndl = m_CMYKParticleShader->getUniformLoc("MV");
+    m_CMYKPMatHndl = m_CMYKParticleShader->getUniformLoc("P");
+    m_CMYKMVPMatHndl = m_CMYKParticleShader->getUniformLoc("MVP");
+    m_CMYKscreenWidthHndl = m_CMYKParticleShader->getUniformLoc("screenWidth");
+
+    glUniform1f(m_CMYKpointSizeHndl,10.f);
+
     // Create our VAO and position buffer
     glGenVertexArrays(1, &m_VAO);
     glBindVertexArray(m_VAO);
@@ -44,6 +64,8 @@ ParticleDrawer::ParticleDrawer() : m_numParticles(0)
 //----------------------------------------------------------------------------------------------------------------------
 ParticleDrawer::~ParticleDrawer()
 {
+    delete m_particleShader;
+    delete m_CMYKParticleShader;
     // Delete our buffers
     glDeleteBuffers(1,&m_posVBO);
     glDeleteVertexArrays(1,&m_VAO);
@@ -72,12 +94,16 @@ void ParticleDrawer::setScreenWidth(int _width)
 {
     m_particleShader->use();
     glUniform1i(m_screenWidthHndl,_width);
+    m_CMYKParticleShader->use();
+    glUniform1i(m_CMYKscreenWidthHndl,_width);
 }
 //----------------------------------------------------------------------------------------------------------------------
 void ParticleDrawer::setParticleSize(float _size)
 {
     m_particleShader->use();
     glUniform1f(m_pointSizeHndl,_size);
+    m_CMYKParticleShader->use();
+    glUniform1f(m_CMYKpointSizeHndl,_size);
     m_particleSize = _size;
 }
 //----------------------------------------------------------------------------------------------------------------------
@@ -111,6 +137,20 @@ void ParticleDrawer::drawFromVAO(GLuint _VAO, int _n, glm::mat4 _M, glm::mat4 _V
     glUniformMatrix4fv(m_PMatHndl, 1, GL_FALSE, glm::value_ptr(_P));
     glUniformMatrix4fv(m_MVMatHndl, 1, GL_FALSE, glm::value_ptr(MV));
     glUniformMatrix4fv(m_MVPMatHndl, 1, GL_FALSE, glm::value_ptr(MVP));
+
+    glBindVertexArray(_VAO);
+    glDrawArrays(GL_POINTS, 0, _n);
+}
+//----------------------------------------------------------------------------------------------------------------------
+void ParticleDrawer::drawCMYKFromVAO(GLuint _VAO, int _n, glm::mat4 _M, glm::mat4 _V, glm::mat4 _P)
+{
+    glm::mat4 MV = _V*_M;
+    glm::mat4 MVP = _P*MV;
+    //grab and instance of our shader library
+    m_CMYKParticleShader->use();
+    glUniformMatrix4fv(m_CMYKPMatHndl, 1, GL_FALSE, glm::value_ptr(_P));
+    glUniformMatrix4fv(m_CMYKMVMatHndl, 1, GL_FALSE, glm::value_ptr(MV));
+    glUniformMatrix4fv(m_CMYKMVPMatHndl, 1, GL_FALSE, glm::value_ptr(MVP));
 
     glBindVertexArray(_VAO);
     glDrawArrays(GL_POINTS, 0, _n);

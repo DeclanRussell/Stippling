@@ -160,3 +160,4 @@ cuda.depend_command = $$CUDA_DIR/bin/nvcc -g -M $$CUDA_INC $$NVCCFLAGS   ${QMAKE
 # Tell Qt that we want add more stuff to the Makefile
 QMAKE_EXTRA_UNIX_COMPILERS += cuda
 
+
