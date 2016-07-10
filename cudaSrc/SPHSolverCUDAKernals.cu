@@ -191,11 +191,14 @@ __device__ float getPixelCMYK(float3 _p,float pClass, float4* _buff)
     np*=make_float3(199.f,199.f,0);
     np = floorf(np);
     float4 cmyk = _buff[(int)np.x + (int)(np.y*200.f)];
-//    if(pClass==0.f) return cmyk.x;
-//    if(pClass==1.f) return cmyk.y;
-//    if(pClass==2.f) return cmyk.z;
-//    if(pClass==3.f) return cmyk.w;
-    return cmyk.x;
+//    switch((int)pClass)
+//    {
+//    case(0): return cmyk.x;
+//    case(1): return cmyk.y;
+//    case(2): return cmyk.z;
+//    case(3): return cmyk.w;
+//    }
+    return cmyk.w;
 
 }
 //----------------------------------------------------------------------------------------------------------------------

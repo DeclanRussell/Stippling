@@ -62,7 +62,7 @@ void main(){
     if(vertexClass==0){ colour = vec3(0,1,1);}
     if(vertexClass==1){ colour = vec3(1,0,1);}
     if(vertexClass==2){ colour = vec3(1,1,0);}
-    if(vertexClass>2){ colour = vec3(vertexClass);}
+    if(vertexClass>2){ colour = vec3(0);}
 
     ogPos = vertexPosition;
     vec4 eyePos = MV * vec4(vertexPosition,1.0);

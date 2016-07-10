@@ -60,7 +60,7 @@ SPHSolverCUDA::SPHSolverCUDA(float _x, float _y, float _t, float _l)
     checkCudaErrors(cudaMalloc(&m_fluidBuffers.pixelI,sizeof(float)*intensity.size()));
     checkCudaErrors(cudaMemcpy(m_fluidBuffers.pixelI,&intensity[0],sizeof(float)*intensity.size(),cudaMemcpyHostToDevice));
     checkCudaErrors(cudaMalloc(&m_fluidBuffers.pixelCMYK,sizeof(float4)*cmyk.size()));
-    checkCudaErrors(cudaMemcpy(m_fluidBuffers.pixelCMYK,&cmyk[0],sizeof(float)*cmyk.size(),cudaMemcpyHostToDevice));
+    checkCudaErrors(cudaMemcpy(m_fluidBuffers.pixelCMYK,&cmyk[0],sizeof(float4)*cmyk.size(),cudaMemcpyHostToDevice));
 
     m_simProperties.gridDim = make_float2(0,0);
     setSmoothingLength(0.3f);
@@ -486,8 +486,8 @@ void SPHSolverCUDA::setSampleImage(QString _loc)
         c = QColor(img.pixel(x,y));
         i = 0.2989f*c.redF()+0.5870f*c.greenF()+0.1140f*c.blueF();
         intensity[x+(img.height()-1-y)*img.width()] = i;
-        cmyk[i] = make_float4(c.cyanF(),c.magentaF(),c.yellowF(),c.blackF());
-        std::cout<<cmyk[i].x<<","<<cmyk[i].y<<","<<cmyk[i].z<<","<<cmyk[i].w<<std::endl;
+        cmyk[x+(img.height()-1-y)*img.width()] = make_float4(c.cyanF(),c.magentaF(),c.yellowF(),c.blackF());
+        //std::cout<<cmyk[i].x<<","<<cmyk[i].y<<","<<cmyk[i].z<<","<<cmyk[i].w<<std::endl;
     }
     checkCudaErrors(cudaFree(m_fluidBuffers.pixelI));
     m_fluidBuffers.pixelI = 0;

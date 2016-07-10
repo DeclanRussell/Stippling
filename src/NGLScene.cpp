@@ -169,7 +169,7 @@ void NGLScene::initializeGL()
   //Create our SPH Solver
   m_SPHSolverCUDA = new SPHSolverCUDA;
 
-  m_SPHSolverCUDA->genRandomSamples(160000);
+  m_SPHSolverCUDA->genRandomSamples(80000);
 
   // Start our timer event. This will begin calling the TimerEvent function that updates our simulation.
   startTimer(0);
